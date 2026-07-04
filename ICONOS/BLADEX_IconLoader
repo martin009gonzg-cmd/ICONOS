@@ -1,101 +1,53 @@
---[[
-    BLADEX_IconLoader_v2.lua
-    ─────────────────────────────────────────────────────────────
-    Drop-in replacement de BLADEX_IconLoader.lua.
-    API PÚBLICA IDÉNTICA — cualquier script que ya use:
-
-        IconLoader.LoadPackage(name)
-        IconLoader.LoadPackages({...})
-        IconLoader.Get(pack, icono)
-        IconLoader.GetAny({pack1, pack2}, icono)
-        IconLoader.Refresh(pack)
-
-    ...sigue funcionando sin cambios (BLADEX_Escaner, BLADEX HUD,
-    IconTester, y cualquier script futuro).
-
-    QUÉ CAMBIA POR DENTRO:
-    1. Manifest-first: busca "<paquete>/manifest.json" vía
-       raw.githubusercontent (1 sola request, sin rate limit de
-       la API de GitHub). Si existe, carga instantáneo.
-    2. Fallback automático al listado por API (método viejo) si
-       el paquete todavía no tiene manifest.json — así paquetes
-       nuevos que agregues sin manifest siguen funcionando.
-    3. Diagnóstico real: IconLoader.Diagnose(pack) imprime la
-       causa exacta del fallo (403 rate limit / 404 ruta mala /
-       timeout / vacío).
-    4. Reintentos con backoff (2 intentos, 1.5s de espera).
-    5. Alias case-insensitive para nombres de paquete.
-    6. Cache persistente en archivo (igual que v1) + Refresh()
-       para forzar recarga ignorando cache.
---]]
-
 local IconLoader = {}
 
--- ══════════════════════════════════════════════
--- CONFIG
--- ══════════════════════════════════════════════
-local REPO_RAW  = "https://raw.githubusercontent.com/martin009gonzg-cmd/ICONOS/refs/heads/main/"
-local REPO_API  = "https://api.github.com/repos/martin009gonzg-cmd/ICONOS/contents/"
-local REPO_REF  = "?ref=main"
-local CACHE_DIR = "BLADEX_IconCache/"
+local BASE       = "https://raw.githubusercontent.com/martin009gonzg-cmd/ICONOS/refs/heads/main/ICONOS/"
+local CACHE_DIR  = "BLADEX_IconCache/"
 
--- Rutas reales de cada paquete dentro del repo.
--- (Si cambias el nombre de una carpeta en GitHub, solo actualiza aquí.)
-local PACKAGE_PATHS = {
-    lucide    = "ICONOS/lucide",
-    solar     = "ICONOS/solar",
-    sfsymbols = "ICONOS/sfsymbols",
-    gravity   = "ICONOS/Gravity", -- ⚠️ ojo con la mayúscula, ver Diagnose()
+local PACKAGE_FILES = {
+    lucide    = "lucide",
+    solar     = "solar",
+    sfsymbols = "sfsymbols",
+    gravity   = "Gravity",
 }
 
--- Alias case-insensitive: "Gravity", "GRAVITY", "gravity" -> "gravity"
 local function resolvePackageName(name)
     if type(name) ~= "string" then return nil end
     local lower = name:lower()
-    for key in pairs(PACKAGE_PATHS) do
+    for key in pairs(PACKAGE_FILES) do
         if key:lower() == lower then return key end
     end
     return nil
 end
 
-if not isfolder(CACHE_DIR) then
-    pcall(function() makefolder(CACHE_DIR) end)
-end
+pcall(function()
+    if not isfolder(CACHE_DIR) then makefolder(CACHE_DIR) end
+end)
 
-local cache = {} -- en memoria, por sesión
+local cache      = {}
+local lastError  = {}
 
--- ══════════════════════════════════════════════
--- UTILIDADES DE RED CON DIAGNÓSTICO
--- ══════════════════════════════════════════════
-
--- Intenta HttpGet con reintentos y devuelve (ok, resultadoOrError, httpStatusGuess)
 local function safeHttpGet(url, attempts)
     attempts = attempts or 2
     local lastErr = nil
     for i = 1, attempts do
-        local ok, result = pcall(function()
-            return game:HttpGet(url)
-        end)
+        local ok, result = pcall(function() return game:HttpGet(url) end)
         if ok and result and #result > 0 then
             return true, result
         end
         lastErr = result
-        if i < attempts then
-            task.wait(1.5 * i) -- backoff simple
-        end
+        if i < attempts then task.wait(1 * i) end
     end
     return false, lastErr
 end
 
--- Clasifica el error para diagnóstico legible
 local function classifyError(errText)
     errText = tostring(errText or "")
-    if errText:find("403") or errText:find("rate limit") then
-        return "RATE_LIMIT (403) — la API de GitHub anónima permite solo 60 requests/hora por IP. Espera unos minutos o usa manifest.json para evitarlo."
-    elseif errText:find("404") then
-        return "NOT_FOUND (404) — la ruta no existe en el repo. Revisa mayúsculas/minúsculas en PACKAGE_PATHS."
+    if errText:find("404") then
+        return "NOT_FOUND (404) — el nombre del archivo no coincide (revisa mayúsculas en PACKAGE_FILES)."
+    elseif errText:find("403") then
+        return "403 — bloqueado temporalmente, reintenta en un momento."
     elseif errText:find("timeout") or errText:find("timed out") then
-        return "TIMEOUT — sin respuesta del servidor, revisa tu conexión."
+        return "TIMEOUT — sin respuesta, revisa tu conexión."
     elseif errText == "" then
         return "Respuesta vacía sin mensaje de error específico."
     else
@@ -103,64 +55,30 @@ local function classifyError(errText)
     end
 end
 
--- Intenta cargar manifest.json de un paquete (rápido, 1 sola request)
-local function tryLoadManifest(path)
-    local url = REPO_RAW .. path .. "/manifest.json"
-    local ok, result = safeHttpGet(url, 2)
+local function fetchPackage(fileName)
+    local url = BASE .. fileName
+    local ok, content = safeHttpGet(url, 2)
     if not ok then
-        return nil, classifyError(result)
-    end
-    local okDecode, decoded = pcall(function()
-        return game:GetService("HttpService"):JSONDecode(result)
-    end)
-    if not okDecode or type(decoded) ~= "table" or not next(decoded) then
-        return nil, "manifest.json existe pero no se pudo parsear o está vacío."
-    end
-    return decoded, nil
-end
-
--- Fallback: método viejo, listar vía API y pedir cada archivo
-local function tryLoadViaAPI(path)
-    local listUrl = REPO_API .. path .. REPO_REF
-    local ok, listResult = safeHttpGet(listUrl, 2)
-    if not ok then
-        return nil, classifyError(listResult)
+        return nil, classifyError(content)
     end
 
-    local okDecode, files = pcall(function()
-        return game:GetService("HttpService"):JSONDecode(listResult)
-    end)
-    if not okDecode or type(files) ~= "table" then
-        return nil, "No se pudo interpretar el listado de la API de GitHub."
+    local compiled, compileErr = loadstring(content)
+    if not compiled then
+        return nil, "El archivo se descargó pero no compiló como Lua: " .. tostring(compileErr)
     end
 
-    local icons = {}
-    for _, fileInfo in ipairs(files) do
-        if fileInfo.name and fileInfo.download_url then
-            local iconName = fileInfo.name:gsub("%.%w+$", "") -- quita extensión
-            local okFile, fileContent = safeHttpGet(fileInfo.download_url, 2)
-            if okFile then
-                -- Soporta tanto texto plano "rbxassetid://123" como archivos Lua "return ..."
-                local assetId = fileContent:match("rbxassetid://%d+")
-                if assetId then
-                    icons[iconName] = assetId
-                end
-            end
-        end
+    local ok2, icons = pcall(compiled)
+    if not ok2 then
+        return nil, "El archivo compiló pero falló al ejecutarse: " .. tostring(icons)
+    end
+    if type(icons) ~= "table" or not next(icons) then
+        return nil, "El archivo se ejecutó pero no devolvió una tabla de iconos válida."
     end
 
-    if not next(icons) then
-        return nil, "El listado de la API respondió, pero ningún archivo tenía un rbxassetid válido."
-    end
     return icons, nil
 end
 
--- ══════════════════════════════════════════════
--- CACHE EN DISCO
--- ══════════════════════════════════════════════
-local function cacheFilePath(pack)
-    return CACHE_DIR .. pack .. ".json"
-end
+local function cacheFilePath(pack) return CACHE_DIR .. pack .. ".json" end
 
 local function saveDiskCache(pack, icons)
     pcall(function()
@@ -181,27 +99,17 @@ local function loadDiskCache(pack)
     return nil
 end
 
--- ══════════════════════════════════════════════
--- CARGA PRINCIPAL (manifest -> API -> disk cache -> falla con diagnóstico)
--- ══════════════════════════════════════════════
-local lastError = {} -- pack -> mensaje de diagnóstico
-
 function IconLoader.LoadPackage(name, forceRefresh)
     local pack = resolvePackageName(name)
     if not pack then
-        lastError[name] = "Paquete desconocido: '" .. tostring(name) .. "'. Paquetes válidos: "
-            .. table.concat((function()
-                local t = {}
-                for k in pairs(PACKAGE_PATHS) do table.insert(t, k) end
-                return t
-            end)(), ", ")
+        local valid = {}
+        for k in pairs(PACKAGE_FILES) do table.insert(valid, k) end
+        lastError[name] = "Paquete desconocido: '" .. tostring(name) .. "'. Válidos: " .. table.concat(valid, ", ")
         warn("BLADEX_IconLoader: " .. lastError[name])
         return nil
     end
 
-    if not forceRefresh and cache[pack] then
-        return cache[pack]
-    end
+    if not forceRefresh and cache[pack] then return cache[pack] end
 
     if not forceRefresh then
         local disk = loadDiskCache(pack)
@@ -211,19 +119,9 @@ function IconLoader.LoadPackage(name, forceRefresh)
         end
     end
 
-    local path = PACKAGE_PATHS[pack]
-
-    -- 1) intento rápido: manifest.json
-    local icons, err = tryLoadManifest(path)
-
-    -- 2) fallback: listado por API (método viejo, más lento y con rate limit)
+    local icons, err = fetchPackage(PACKAGE_FILES[pack])
     if not icons then
-        lastError[pack] = "manifest.json no disponible (" .. tostring(err) .. "). Probando API..."
-        icons, err = tryLoadViaAPI(path)
-    end
-
-    if not icons then
-        lastError[pack] = err or "Fallo desconocido al cargar el paquete."
+        lastError[pack] = err or "Fallo desconocido."
         warn("BLADEX_IconLoader: fallo cargando '" .. pack .. "' -> " .. lastError[pack])
         return nil
     end
@@ -247,11 +145,9 @@ end
 
 function IconLoader.Get(packName, iconName)
     local icons = IconLoader.LoadPackage(packName)
-    if icons then return icons[iconName] end
-    return nil
+    return icons and icons[iconName] or nil
 end
 
--- Busca un icono en varios paquetes en orden hasta encontrarlo
 function IconLoader.GetAny(packNames, iconName)
     for _, packName in ipairs(packNames) do
         local result = IconLoader.Get(packName, iconName)
@@ -264,22 +160,20 @@ function IconLoader.Refresh(packName)
     return IconLoader.LoadPackage(packName, true)
 end
 
--- Diagnóstico legible del último intento de carga de un paquete
 function IconLoader.Diagnose(packName)
     local pack = resolvePackageName(packName) or packName
     local msg = lastError[pack]
     if msg then
         print("🔎 BLADEX_IconLoader Diagnose['" .. tostring(pack) .. "']: " .. msg)
     else
-        print("🔎 BLADEX_IconLoader Diagnose['" .. tostring(pack) .. "']: sin errores registrados (¿ya cargó bien o nunca se intentó?).")
+        print("🔎 BLADEX_IconLoader Diagnose['" .. tostring(pack) .. "']: sin errores registrados.")
     end
     return msg
 end
 
--- Lista los paquetes registrados (útil para UIs como el IconTester)
 function IconLoader.ListPackages()
     local names = {}
-    for k in pairs(PACKAGE_PATHS) do table.insert(names, k) end
+    for k in pairs(PACKAGE_FILES) do table.insert(names, k) end
     table.sort(names)
     return names
 end
