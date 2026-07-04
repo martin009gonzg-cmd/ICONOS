@@ -1,7 +1,8 @@
 local IconLoader = {}
 
-local BASE       = "https://raw.githubusercontent.com/martin009gonzg-cmd/ICONOS/refs/heads/main/ICONOS/"
-local CACHE_DIR  = "BLADEX_IconCache/"
+local BASE        = "https://raw.githubusercontent.com/martin009gonzg-cmd/ICONOS/refs/heads/main/ICONOS/"
+local CACHE_DIR   = "BLADEX_IconCache/"
+local USED_FILE   = CACHE_DIR .. "used_icons.json"
 
 local PACKAGE_FILES = {
     lucide    = "lucide",
@@ -23,8 +24,39 @@ pcall(function()
     if not isfolder(CACHE_DIR) then makefolder(CACHE_DIR) end
 end)
 
-local cache      = {}
-local lastError  = {}
+local packageCache = {}
+local lastError     = {}
+
+local usedCache = nil
+
+local function keyFor(pack, iconName) return pack .. "::" .. iconName end
+
+local function loadUsedCacheFromDisk()
+    if usedCache then return usedCache end
+    usedCache = {}
+    pcall(function()
+        if isfile(USED_FILE) then
+            local decoded = game:GetService("HttpService"):JSONDecode(readfile(USED_FILE))
+            if type(decoded) == "table" then usedCache = decoded end
+        end
+    end)
+    return usedCache
+end
+
+local function saveUsedCacheToDisk()
+    pcall(function()
+        writefile(USED_FILE, game:GetService("HttpService"):JSONEncode(usedCache or {}))
+    end)
+end
+
+local function rememberUsedIcon(pack, iconName, assetId)
+    loadUsedCacheFromDisk()
+    local k = keyFor(pack, iconName)
+    if usedCache[k] ~= assetId then
+        usedCache[k] = assetId
+        saveUsedCacheToDisk()
+    end
+end
 
 local function safeHttpGet(url, attempts)
     attempts = attempts or 2
@@ -78,27 +110,6 @@ local function fetchPackage(fileName)
     return icons, nil
 end
 
-local function cacheFilePath(pack) return CACHE_DIR .. pack .. ".json" end
-
-local function saveDiskCache(pack, icons)
-    pcall(function()
-        writefile(cacheFilePath(pack), game:GetService("HttpService"):JSONEncode(icons))
-    end)
-end
-
-local function loadDiskCache(pack)
-    local path = cacheFilePath(pack)
-    if isfile(path) then
-        local ok, decoded = pcall(function()
-            return game:GetService("HttpService"):JSONDecode(readfile(path))
-        end)
-        if ok and type(decoded) == "table" and next(decoded) then
-            return decoded
-        end
-    end
-    return nil
-end
-
 function IconLoader.LoadPackage(name, forceRefresh)
     local pack = resolvePackageName(name)
     if not pack then
@@ -109,15 +120,7 @@ function IconLoader.LoadPackage(name, forceRefresh)
         return nil
     end
 
-    if not forceRefresh and cache[pack] then return cache[pack] end
-
-    if not forceRefresh then
-        local disk = loadDiskCache(pack)
-        if disk then
-            cache[pack] = disk
-            return disk
-        end
-    end
+    if not forceRefresh and packageCache[pack] then return packageCache[pack] end
 
     local icons, err = fetchPackage(PACKAGE_FILES[pack])
     if not icons then
@@ -126,8 +129,7 @@ function IconLoader.LoadPackage(name, forceRefresh)
         return nil
     end
 
-    cache[pack] = icons
-    saveDiskCache(pack, icons)
+    packageCache[pack] = icons
     lastError[pack] = nil
     return icons
 end
@@ -144,8 +146,21 @@ function IconLoader.LoadPackages(names)
 end
 
 function IconLoader.Get(packName, iconName)
-    local icons = IconLoader.LoadPackage(packName)
-    return icons and icons[iconName] or nil
+    local pack = resolvePackageName(packName)
+    if not pack then return nil end
+
+    loadUsedCacheFromDisk()
+    local cached = usedCache[keyFor(pack, iconName)]
+    if cached then return cached end
+
+    local icons = IconLoader.LoadPackage(pack)
+    if not icons then return nil end
+
+    local assetId = icons[iconName]
+    if assetId then
+        rememberUsedIcon(pack, iconName, assetId)
+    end
+    return assetId
 end
 
 function IconLoader.GetAny(packNames, iconName)
@@ -176,6 +191,20 @@ function IconLoader.ListPackages()
     for k in pairs(PACKAGE_FILES) do table.insert(names, k) end
     table.sort(names)
     return names
+end
+
+function IconLoader.ListUsedIcons()
+    loadUsedCacheFromDisk()
+    local copy = {}
+    for k, v in pairs(usedCache) do copy[k] = v end
+    return copy
+end
+
+function IconLoader.ClearUsedCache()
+    usedCache = {}
+    pcall(function()
+        if isfile(USED_FILE) then delfile(USED_FILE) end
+    end)
 end
 
 return IconLoader
