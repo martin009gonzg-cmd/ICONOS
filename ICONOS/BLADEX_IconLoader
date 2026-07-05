@@ -8,7 +8,7 @@ local PACKAGE_FILES = {
     lucide    = "lucide",
     solar     = "solar",
     sfsymbols = "sfsymbols",
-    gravity   = "Gravity",
+    gravity   = "gravity",
 }
 
 local function resolvePackageName(name)
