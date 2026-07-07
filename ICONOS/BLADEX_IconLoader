@@ -1,7 +1,8 @@
 local IconLoader = {}
 
 local BASE        = "https://raw.githubusercontent.com/martin009gonzg-cmd/ICONOS/refs/heads/main/ICONOS/"
-local CACHE_DIR   = "BLADEX_IconCache/"
+local ROOT_DIR    = "BLADEX/"
+local CACHE_DIR   = ROOT_DIR .. "assets/"
 local USED_FILE   = CACHE_DIR .. "used_icons.json"
 
 local PACKAGE_FILES = {
@@ -20,6 +21,14 @@ local function resolvePackageName(name)
     return nil
 end
 
+-- Único punto de salida para avisos: error al cargar una textura/UID
+local function reportTextureError(uid, msg)
+    warn("[BLADEX] Error al cargar textura (UID: " .. tostring(uid) .. "): " .. tostring(msg))
+end
+
+pcall(function()
+    if not isfolder(ROOT_DIR) then makefolder(ROOT_DIR) end
+end)
 pcall(function()
     if not isfolder(CACHE_DIR) then makefolder(CACHE_DIR) end
 end)
@@ -116,7 +125,7 @@ function IconLoader.LoadPackage(name, forceRefresh)
         local valid = {}
         for k in pairs(PACKAGE_FILES) do table.insert(valid, k) end
         lastError[name] = "Paquete desconocido: '" .. tostring(name) .. "'. Válidos: " .. table.concat(valid, ", ")
-        warn("BLADEX_IconLoader: " .. lastError[name])
+        reportTextureError(name, lastError[name])
         return nil
     end
 
@@ -125,7 +134,7 @@ function IconLoader.LoadPackage(name, forceRefresh)
     local icons, err = fetchPackage(PACKAGE_FILES[pack])
     if not icons then
         lastError[pack] = err or "Fallo desconocido."
-        warn("BLADEX_IconLoader: fallo cargando '" .. pack .. "' -> " .. lastError[pack])
+        reportTextureError(pack, lastError[pack])
         return nil
     end
 
@@ -177,13 +186,7 @@ end
 
 function IconLoader.Diagnose(packName)
     local pack = resolvePackageName(packName) or packName
-    local msg = lastError[pack]
-    if msg then
-        print("🔎 BLADEX_IconLoader Diagnose['" .. tostring(pack) .. "']: " .. msg)
-    else
-        print("🔎 BLADEX_IconLoader Diagnose['" .. tostring(pack) .. "']: sin errores registrados.")
-    end
-    return msg
+    return lastError[pack]
 end
 
 function IconLoader.ListPackages()
