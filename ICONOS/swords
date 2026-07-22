@@ -1,6 +1,6 @@
 return {
-	["house"] = "rbxassetid://87323474877668",
-	["square-terminal"] = "rbxassetid://85210187572139",
-	["gamepad-2"] = "rbxassetid://76539200568109",
-	["settings"] = "rbxassetid://110207508186667",
+	["house"] = "rbxassetid://140623380548188",
+	["square-terminal"] = "rbxassetid://93160857701002",
+	["gamepad-2"] = "rbxassetid://132321352749915",
+	["settings"] = "rbxassetid://122648469541413",
 }
