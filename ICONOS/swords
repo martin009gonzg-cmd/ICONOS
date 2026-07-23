@@ -3,4 +3,5 @@ return {
 	["square-terminal"] = "rbxassetid://93160857701002",
 	["gamepad-2"] = "rbxassetid://132321352749915",
 	["settings"] = "rbxassetid://122648469541413",
+	["blades-hud-logo"] = "rbxassetid://125064196202041",
 }
